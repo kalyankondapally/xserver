@@ -1103,6 +1103,13 @@ error:
     return FALSE;
 }
 
+static struct wl_drm *
+xwl_glamor_gbm_get_wl_drm_interface(struct xwl_screen *xwl_screen)
+{
+    struct xwl_gbm_private *xwl_gbm = xwl_gbm_get(xwl_screen);
+    return xwl_gbm->drm;
+}
+
 void
 xwl_glamor_init_gbm(struct xwl_screen *xwl_screen)
 {
@@ -1131,4 +1138,5 @@ xwl_glamor_init_gbm(struct xwl_screen *xwl_screen)
     xwl_screen->gbm_backend.init_screen = xwl_glamor_gbm_init_screen;
     xwl_screen->gbm_backend.get_wl_buffer_for_pixmap = xwl_glamor_gbm_get_wl_buffer_for_pixmap;
     xwl_screen->gbm_backend.is_available = TRUE;
+    xwl_screen->gbm_backend.get_wl_drm_interface = xwl_glamor_gbm_get_wl_drm_interface;
 }

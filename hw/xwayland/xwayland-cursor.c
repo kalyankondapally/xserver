@@ -43,19 +43,19 @@
 static DevPrivateKeyRec xwl_cursor_private_key;
 
 static void
-expand_source_and_mask(CursorPtr cursor, CARD32 *data)
+expand_source_and_mask(CursorPtr cursor, CARD32 *data, int dataStride)
 {
     CARD32 *p, d, fg, bg;
     CursorBitsPtr bits = cursor->bits;
     int x, y, stride, i, bit;
 
-    p = data;
     fg = ((cursor->foreRed & 0xff00) << 8) |
         (cursor->foreGreen & 0xff00) | (cursor->foreGreen >> 8);
     bg = ((cursor->backRed & 0xff00) << 8) |
         (cursor->backGreen & 0xff00) | (cursor->backGreen >> 8);
     stride = BitmapBytePad(bits->width);
-    for (y = 0; y < bits->height; y++)
+    for (y = 0; y < bits->height; y++) {
+        p = data + y * dataStride / sizeof (*p);
         for (x = 0; x < bits->width; x++) {
             i = y * stride + x / 8;
             bit = 1 << (x & 7);
@@ -70,6 +70,7 @@ expand_source_and_mask(CursorPtr cursor, CARD32 *data)
 
             *p++ = d;
         }
+    }
 }
 
 static Bool
@@ -141,7 +142,7 @@ xwl_seat_set_cursor(struct xwl_seat *xwl_seat)
     struct xwl_cursor *xwl_cursor = &xwl_seat->cursor;
     PixmapPtr pixmap;
     CursorPtr cursor;
-    int stride;
+    int srcStride, dstStride;
 
     if (!xwl_seat->wl_pointer)
         return;
@@ -164,12 +165,21 @@ xwl_seat_set_cursor(struct xwl_seat *xwl_seat)
     if (!pixmap)
         return;
 
-    stride = cursor->bits->width * 4;
-    if (cursor->bits->argb)
-        memcpy(pixmap->devPrivate.ptr,
-               cursor->bits->argb, cursor->bits->height * stride);
-    else
-        expand_source_and_mask(cursor, pixmap->devPrivate.ptr);
+       srcStride = cursor->bits->width * 4;
+        dstStride = (int) pixmap->devKind;
+        if (cursor->bits->argb) {
+            CARD8 *s = (CARD8 *) cursor->bits->argb;
+            CARD8 *d = pixmap->devPrivate.ptr;
+            int height = cursor->bits->height;
+
+            while (height--) {
+                memcpy(d, s, srcStride);
+               s += srcStride;
+                d += dstStride;
+            }
+        } else {
+            expand_source_and_mask(cursor, pixmap->devPrivate.ptr, dstStride);
+        }
 
     wl_pointer_set_cursor(xwl_seat->wl_pointer,
                           xwl_seat->pointer_enter_serial,
@@ -195,7 +205,7 @@ xwl_tablet_tool_set_cursor(struct xwl_tablet_tool *xwl_tablet_tool)
     struct xwl_cursor *xwl_cursor = &xwl_tablet_tool->cursor;
     PixmapPtr pixmap;
     CursorPtr cursor;
-    int stride;
+    int srcStride, dstStride;
 
     if (!xwl_seat->x_cursor) {
         zwp_tablet_tool_v2_set_cursor(xwl_tablet_tool->tool,
@@ -216,12 +226,21 @@ xwl_tablet_tool_set_cursor(struct xwl_tablet_tool *xwl_tablet_tool)
     if (!pixmap)
         return;
 
-    stride = cursor->bits->width * 4;
-    if (cursor->bits->argb)
-        memcpy(pixmap->devPrivate.ptr,
-               cursor->bits->argb, cursor->bits->height * stride);
-    else
-        expand_source_and_mask(cursor, pixmap->devPrivate.ptr);
+        srcStride = cursor->bits->width * 4;
+        dstStride = (int) pixmap->devKind;
+        if (cursor->bits->argb) {
+            CARD8 *s = (CARD8 *) cursor->bits->argb;
+            CARD8 *d = pixmap->devPrivate.ptr;
+            int height = cursor->bits->height;
+
+            while (height--) {
+                memcpy(d, s, srcStride);
+                s += srcStride;
+                d += dstStride;
+            }
+       } else {
+            expand_source_and_mask(cursor, pixmap->devPrivate.ptr, dstStride);
+        }
 
     zwp_tablet_tool_v2_set_cursor(xwl_tablet_tool->tool,
                                   xwl_tablet_tool->proximity_in_serial,

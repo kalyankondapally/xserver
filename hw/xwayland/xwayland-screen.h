@@ -105,6 +105,9 @@ struct xwl_screen {
 
     struct glamor_context *glamor_ctx;
 
+    int wl_fd;
+    int dmabuf_count;
+
     Atom allow_commits_prop;
 };
 

@@ -47,6 +47,8 @@
 extern _X_EXPORT Bool noXFree86VidModeExtension;
 #endif
 
+#include "drm-client-protocol.h"
+
 void
 ddxGiveUp(enum ExitCode error)
 {

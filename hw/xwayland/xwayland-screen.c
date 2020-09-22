@@ -393,12 +393,10 @@ registry_global(void *data, struct wl_registry *registry, uint32_t id,
     else if (strcmp(interface, "wp_viewporter") == 0) {
         xwl_screen->viewporter = wl_registry_bind(registry, id, &wp_viewporter_interface, 1);
     }
-#ifdef XWL_HAS_GLAMOR
     else if (xwl_screen->glamor) {
         xwl_glamor_init_wl_registry(xwl_screen, registry, id, interface,
                                     version);
     }
-#endif
 }
 
 static void

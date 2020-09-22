@@ -83,6 +83,11 @@ struct xwl_egl_backend {
      * callback is optional.
      */
     Bool (*allow_commits)(struct xwl_window *xwl_window);
+
+    /* Called by Xwayland to retrieve a pointer to a valid wl_drm for
+     * the given screen such that buffers can shared via dmabuf.
+     */
+    struct wl_drm *(*get_wl_drm_interface)(struct xwl_screen *xwl_screen);
 };
 
 #ifdef XWL_HAS_GLAMOR

@@ -28,6 +28,7 @@
 
 #include "os.h"
 
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -42,14 +43,23 @@
 #include "xwayland-pixmap.h"
 #include "xwayland-screen.h"
 #include "xwayland-shm.h"
+#include <linux/virtwl.h>
+
+#include "drm-client-protocol.h"
+
+#define DMA_BUF_SYNC_READ (1 << 0)
+#define DMA_BUF_SYNC_WRITE (2 << 0)
+#define DMA_BUF_SYNC_RW (DMA_BUF_SYNC_READ | DMA_BUF_SYNC_WRITE)
+#define DMA_BUF_SYNC_START (0 << 2)
+#define DMA_BUF_SYNC_END (1 << 2)
 
 struct xwl_pixmap {
     struct wl_buffer *buffer;
     void *data;
     size_t size;
+    int dmabuf_fd;
 };
 
-#ifndef HAVE_MKOSTEMP
 static int
 set_cloexec_or_close(int fd)
 {
@@ -71,7 +81,6 @@ set_cloexec_or_close(int fd)
     close(fd);
     return -1;
 }
-#endif
 
 static int
 create_tmpfile_cloexec(char *tmpname)
@@ -217,6 +226,27 @@ static const struct wl_buffer_listener xwl_shm_buffer_listener = {
     xwl_pixmap_buffer_release_cb,
 };
 
+static uint32_t
+drm_format_for_depth(int depth)
+{
+    switch (depth) {
+    case 16:
+        return WL_DRM_FORMAT_RGB565;
+    case 24:
+        return WL_DRM_FORMAT_XRGB8888;
+    default:
+        ErrorF("unexpected depth: %d\n", depth);
+    case 32:
+        return WL_DRM_FORMAT_ARGB8888;
+    }
+}
+
+// Buffer size threshold for which DMABuf should be considered.
+#define DMABUF_SIZE_THRESHOLD 65536
+
+// Maximum number of DMABufs allowed at any given time.
+#define DMABUF_COUNT_MAX 256
+
 PixmapPtr
 xwl_shm_create_pixmap(ScreenPtr screen,
                       int width, int height, int depth, unsigned int hint)
@@ -229,7 +259,7 @@ xwl_shm_create_pixmap(ScreenPtr screen,
     uint32_t format;
     int fd;
 
-    if (hint == CREATE_PIXMAP_USAGE_GLYPH_PICTURE ||
+    if (hint != CREATE_PIXMAP_USAGE_GLYPH_PICTURE ||
         (!xwl_screen->rootless && hint != CREATE_PIXMAP_USAGE_BACKING_PIXMAP) ||
         (width == 0 && height == 0) || depth < 15)
         return fbCreatePixmap(screen, width, height, depth, hint);
@@ -245,10 +275,69 @@ xwl_shm_create_pixmap(ScreenPtr screen,
     stride = PixmapBytePad(width, depth);
     size = stride * height;
     xwl_pixmap->buffer = NULL;
-    xwl_pixmap->size = size;
-    fd = os_create_anonymous_file(size);
-    if (fd < 0)
-        goto err_free_xwl_pixmap;
+       xwl_pixmap->dmabuf_fd = -1;
+        fd = -1;
+
+        if (xwl_screen->egl_backend &&
+        xwl_screen->egl_backend->get_wl_drm_interface &&
+        xwl_screen->egl_backend->get_wl_drm_interface(xwl_screen) &&
+            size > DMABUF_SIZE_THRESHOLD &&
+            xwl_screen->dmabuf_count < DMABUF_COUNT_MAX) {
+        struct wl_drm *drm = xwl_screen->egl_backend->get_wl_drm_interface(
+             xwl_screen);
+            uint32_t drm_format = drm_format_for_depth(depth);
+            struct virtwl_ioctl_new new_alloc = {
+                .type = VIRTWL_IOCTL_NEW_DMABUF,
+                .fd = -1,
+                .flags = 0,
+                .dmabuf = {
+                    .width = width,
+                    .height = height,
+                    .format = drm_format,
+                },
+            };
+            int ret = ioctl(xwl_screen->wl_fd, VIRTWL_IOCTL_NEW, &new_alloc);
+            if (ret == 0) {
+                fd = set_cloexec_or_close(new_alloc.fd);
+                if (fd >= 0) {
+                    struct virtwl_ioctl_dmabuf_sync sync = {0};
+
+                    sync.flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_RW;
+                    ioctl(fd, VIRTWL_IOCTL_DMABUF_SYNC, &sync);
+
+                    stride = new_alloc.dmabuf.stride0;
+                    size = stride * height;
+                    xwl_pixmap->dmabuf_fd = fd;
+                    xwl_pixmap->buffer =
+                        wl_drm_create_prime_buffer(drm,
+                                                   fd,
+                                                   width,
+                                                   height,
+                                                   drm_format,
+                                                   0, stride,
+                                                   0, 0,
+                                                   0, 0);
+                }
+            }
+        }
+
+        if (!xwl_pixmap->buffer) {
+            fd = os_create_anonymous_file(size);
+            if (fd < 0)
+                goto err_free_xwl_pixmap;
+
+            format = shm_format_for_depth(depth);
+            pool = wl_shm_create_pool(xwl_screen->shm, fd, size);
+            xwl_pixmap->buffer = wl_shm_pool_create_buffer(pool,
+                                                          0,
+                                                          width,
+                                                          height,
+                                                           stride,
+                                                           format);
+            wl_shm_pool_destroy(pool);
+        }
+
+        xwl_pixmap->size = size;
 
     xwl_pixmap->data = mmap(NULL, size, PROT_READ | PROT_WRITE,
                                   MAP_SHARED, fd, 0);
@@ -260,14 +349,10 @@ xwl_shm_create_pixmap(ScreenPtr screen,
                                         stride, xwl_pixmap->data))
         goto err_munmap;
 
-    format = shm_format_for_depth(pixmap->drawable.depth);
-    pool = wl_shm_create_pool(xwl_screen->shm, fd, xwl_pixmap->size);
-    xwl_pixmap->buffer = wl_shm_pool_create_buffer(pool, 0,
-                                                   pixmap->drawable.width,
-                                                   pixmap->drawable.height,
-                                                   pixmap->devKind, format);
-    wl_shm_pool_destroy(pool);
-    close(fd);
+     if (xwl_pixmap->dmabuf_fd != -1)
+         xwl_screen->dmabuf_count++;
+     else
+         close(fd);
 
     wl_buffer_add_listener(xwl_pixmap->buffer,
                            &xwl_shm_buffer_listener, pixmap);
@@ -294,10 +379,16 @@ xwl_shm_destroy_pixmap(PixmapPtr pixmap)
     struct xwl_pixmap *xwl_pixmap = xwl_pixmap_get(pixmap);
 
     if (xwl_pixmap && pixmap->refcnt == 1) {
+        struct xwl_screen *xwl_screen =
+            xwl_screen_get(pixmap->drawable.pScreen);
         xwl_pixmap_del_buffer_release_cb(pixmap);
         if (xwl_pixmap->buffer)
             wl_buffer_destroy(xwl_pixmap->buffer);
         munmap(xwl_pixmap->data, xwl_pixmap->size);
+        if (xwl_pixmap->dmabuf_fd != -1) {
+            close(xwl_pixmap->dmabuf_fd);
+            xwl_screen->dmabuf_count--;
+        }
         free(xwl_pixmap);
     }
 
@@ -307,7 +398,19 @@ xwl_shm_destroy_pixmap(PixmapPtr pixmap)
 struct wl_buffer *
 xwl_shm_pixmap_get_wl_buffer(PixmapPtr pixmap)
 {
-    return xwl_pixmap_get(pixmap)->buffer;
+        struct xwl_pixmap *xwl_pixmap = xwl_pixmap_get(pixmap);
+
+        if (xwl_pixmap->dmabuf_fd != -1) {
+            struct virtwl_ioctl_dmabuf_sync sync = {0};
+
+            // Trigger a flush by stopping and starting access to buffer.
+            sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_RW;
+            ioctl(xwl_pixmap->dmabuf_fd, VIRTWL_IOCTL_DMABUF_SYNC, &sync);
+            sync.flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_RW;
+            ioctl(xwl_pixmap->dmabuf_fd, VIRTWL_IOCTL_DMABUF_SYNC, &sync);
+        }
+
+        return xwl_pixmap->buffer;
 }
 
 Bool
@@ -315,6 +418,11 @@ xwl_shm_create_screen_resources(ScreenPtr screen)
 {
     struct xwl_screen *xwl_screen = xwl_screen_get(screen);
     int ret;
+
+    xwl_screen->wl_fd = open("/dev/wl0", O_RDWR);
+    if (xwl_screen->wl_fd < 0)
+      return 0;
+    xwl_screen->dmabuf_count = 0;
 
     screen->CreateScreenResources = xwl_screen->CreateScreenResources;
     ret = (*screen->CreateScreenResources) (screen);
