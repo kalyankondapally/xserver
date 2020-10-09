@@ -259,8 +259,7 @@ xwl_shm_create_pixmap(ScreenPtr screen,
     uint32_t format;
     int fd;
 
-    if (hint != CREATE_PIXMAP_USAGE_GLYPH_PICTURE ||
-        (!xwl_screen->rootless && hint != CREATE_PIXMAP_USAGE_BACKING_PIXMAP) ||
+    if ((!xwl_screen->rootless && hint != CREATE_PIXMAP_USAGE_BACKING_PIXMAP) ||
         (width == 0 && height == 0) || depth < 15)
         return fbCreatePixmap(screen, width, height, depth, hint);
 
